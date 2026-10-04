@@ -619,23 +619,66 @@ const CTR = [0, 0, 0];
   for (const h of ['lh', 'rh']) { const p = hemis[h].pos; for (let i = 0; i < p.length; i += 3) { CTR[0] += p[i]; CTR[1] += p[i + 1]; CTR[2] += p[i + 2]; n++; } }
   CTR[0] /= n; CTR[1] /= n; CTR[2] /= n;
 }
-let BRAIN_R = 1;
-for (const h of ['lh', 'rh']) {
-  const p = hemis[h].pos;
-  for (let i = 0; i < p.length; i += 3) {
-    const dx = p[i] - CTR[0], dy = p[i + 1] - CTR[1], dz = p[i + 2] - CTR[2];
-    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (d > BRAIN_R) BRAIN_R = d;
-  }
-}
+const ALL_VERTS = (() => {
+  const parts = [hemis.lh.pos, hemis.rh.pos];
+  const a = new Float32Array(parts.reduce((s, p) => s + p.length, 0));
+  let o = 0;
+  for (const p of parts) { a.set(p, o); o += p.length; }
+  return a;
+})();
 const CENTER = new THREE.Vector3(CTR[0], CTR[1], CTR[2]);
 const HOME_PHI = 1.18, HOME_THETA = 0.78;
+function sphereR(t) {
+  let R = 1;
+  const v = ALL_VERTS;
+  for (let i = 0; i < v.length; i += 3) {
+    const dx = v[i] - t.x, dy = v[i + 1] - t.y, dz = v[i + 2] - t.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > R) R = d;
+  }
+  return R;
+}
 let fitR = 300;
-function calcFit() {
+function calcFit(target) {
   const a = Math.max(0.1, camera.aspect || 1);
   const halfH = Math.atan(tanHalfV * a);
-  fitR = (BRAIN_R / Math.sin(Math.min((FOV / 2) * Math.PI / 180, halfH))) * 1.03;
+  fitR = (sphereR(target) / Math.sin(Math.min((FOV / 2) * Math.PI / 180, halfH))) * 1.03;
   return fitR;
+}
+/* true visual center: iterate until the projected bounding box of all brain
+   vertices sits exactly in the middle of the frame (vertex average is pulled
+   toward the interior of the cortical sheet, so it reads off-center) */
+function refineCenter(a) {
+  const V = ALL_VERTS;
+  const T = CENTER.clone();
+  const f = 1 / tanHalfV;
+  for (let it = 0; it < 3; it++) {
+    const r = calcFit(T);
+    const sp = Math.sin(HOME_PHI), cp = Math.cos(HOME_PHI);
+    const cam = [T.x + r * sp * Math.sin(HOME_THETA), T.y + r * sp * Math.cos(HOME_THETA), T.z + r * cp];
+    let zf = [T.x - cam[0], T.y - cam[1], T.z - cam[2]];
+    const zl = Math.hypot(zf[0], zf[1], zf[2]); zf = [zf[0]/zl, zf[1]/zl, zf[2]/zl];
+    let rx = -zf[1], ry = zf[0], rz = 0;
+    const rl = Math.hypot(rx, ry, rz) || 1; rx /= rl; ry /= rl;
+    const yx = zf[1]*rz - zf[2]*ry, yy = zf[2]*rx - zf[0]*rz, yz = zf[0]*ry - zf[1]*rx;
+    let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+    for (let i = 0; i < V.length; i += 3) {
+      const dx = V[i] - cam[0], dy = V[i+1] - cam[1], dz = V[i+2] - cam[2];
+      const cz = dx*zf[0] + dy*zf[1] + dz*zf[2];
+      if (cz < 1) continue;
+      const nx = f * (dx*rx + dy*ry + dz*rz) / (a * cz);
+      const ny = f * (dx*yx + dy*yy + dz*yz) / cz;
+      if (nx < minx) minx = nx; if (nx > maxx) maxx = nx;
+      if (ny < miny) miny = ny; if (ny > maxy) maxy = ny;
+    }
+    const mx = (minx + maxx) / 2, my = (miny + maxy) / 2;
+    if (Math.abs(mx) < 1e-4 && Math.abs(my) < 1e-4) break;
+    const hw = r * tanHalfV;
+    const sx = mx * hw * a, sy = my * hw;
+    T.x += rx*sx + yx*sy; T.y += ry*sx + yy*sy; T.z += rz*sx + yz*sy;
+  }
+  CENTER.copy(T);
+  return CENTER;
 }
 const controls = {
   target: CENTER.clone(),
@@ -676,16 +719,17 @@ function flyToRegion(r) {
   controls.autoRotate = false;
 }
 function resetView() {
-  const r = calcFit();
+  const hc = refineCenter(camera.aspect);
+  const r = calcFit(hc);
   const sp = Math.sin(HOME_PHI), cp = Math.cos(HOME_PHI);
   controls.flying = {
     t0: performance.now(), dur: 900,
     fromPos: camera.position.clone(), toPos: new THREE.Vector3(
-      CENTER.x + r * sp * Math.sin(HOME_THETA),
-      CENTER.y + r * sp * Math.cos(HOME_THETA),
-      CENTER.z + r * cp
+      hc.x + r * sp * Math.sin(HOME_THETA),
+      hc.y + r * sp * Math.cos(HOME_THETA),
+      hc.z + r * cp
     ),
-    fromTarget: controls.target.clone(), toTarget: CENTER.clone(),
+    fromTarget: controls.target.clone(), toTarget: hc.clone(),
   };
   controls.autoRotate = false;
 }
@@ -715,21 +759,36 @@ function tick() {
 /* pointer interaction */
 const dom = renderer.domElement;
 let dragMode = null, lastX = 0, lastY = 0, downX = 0, downY = 0, moved = false;
+let userMoved = false;
 dom.style.touchAction = 'none';
+const activePtrs = new Set();
+let lastMulti = 0;
 dom.addEventListener('pointerdown', e => {
+  activePtrs.add(e.pointerId);
+  if (activePtrs.size >= 2) {
+    /* two-finger gesture: pan + pinch handled by touch events below */
+    lastMulti = performance.now();
+    dragMode = null;
+    userMoved = true;
+    controls.autoRotate = false;
+    controls.flying = null;
+    return;
+  }
   if (e.button === 2 || e.shiftKey) dragMode = 'pan'; else dragMode = 'rotate';
+  userMoved = true;
   lastX = downX = e.clientX; lastY = downY = e.clientY; moved = false;
   dom.setPointerCapture(e.pointerId);
   controls.autoRotate = false;
   controls.flying = null;
 });
 dom.addEventListener('pointermove', e => {
+  if (activePtrs.size >= 2) return; /* two-finger mode */
   if (dragMode) {
     const dx = e.clientX - lastX, dy = e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 6) moved = true;
     if (dragMode === 'rotate') {
-      controls.theta -= dx * 0.0055;
+      controls.theta += dx * 0.0055;
       controls.phi = Math.max(0.08, Math.min(Math.PI - 0.08, controls.phi - dy * 0.0055));
     } else {
       const panSpeed = controls.radius * 0.0016;
@@ -741,24 +800,46 @@ dom.addEventListener('pointermove', e => {
     onHover(e);
   }
 });
-dom.addEventListener('pointerup', e => { dragMode = null; });
+function endPtr(e) {
+  activePtrs.delete(e.pointerId);
+  if (activePtrs.size === 0) dragMode = null;
+}
+dom.addEventListener('pointerup', endPtr);
+dom.addEventListener('pointercancel', endPtr);
 dom.addEventListener('contextmenu', e => e.preventDefault());
 dom.addEventListener('wheel', e => {
   e.preventDefault();
+  userMoved = true;
   controls.radius = Math.max(fitR * 0.22, Math.min(fitR * 3.5, controls.radius * Math.exp(e.deltaY * 0.0011)));
 }, { passive: false });
-/* touch pinch */
-let pinchD = 0;
+/* touch: two fingers = pan (midpoint drag) + pinch zoom (distance change) */
+let pinchD = 0, midX = 0, midY = 0;
 dom.addEventListener('touchstart', e => {
-  if (e.touches.length === 2) pinchD = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  if (e.touches.length === 2) {
+    pinchD = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+  }
 }, { passive: true });
 dom.addEventListener('touchmove', e => {
   if (e.touches.length === 2) {
-    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    const t0 = e.touches[0], t1 = e.touches[1];
+    const d = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+    const mx = (t0.clientX + t1.clientX) / 2, my = (t0.clientY + t1.clientY) / 2;
+    lastMulti = performance.now();
+    userMoved = true;
     if (pinchD > 0) controls.radius = Math.max(fitR * 0.22, Math.min(fitR * 3.5, controls.radius * pinchD / d));
-    pinchD = d;
+    const dx = mx - midX, dy = my - midY;
+    if (dx !== 0 || dy !== 0) {
+      const panSpeed = controls.radius * 0.0016;
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+      controls.target.addScaledVector(right, -dx * panSpeed).addScaledVector(up, dy * panSpeed);
+    }
+    pinchD = d; midX = mx; midY = my;
   }
 }, { passive: true });
+dom.addEventListener('touchend', e => { if (e.touches.length < 2) pinchD = 0; }, { passive: true });
 
 /* ================= hover picking ================= */
 const ray = new THREE.Raycaster();
@@ -797,7 +878,7 @@ function onHover(e) {
 }
 function hideTooltip() { tooltip.style.display = 'none'; dom.style.cursor = 'default'; hoverFace = null; }
 dom.addEventListener('click', e => {
-  if (dragMode || moved) return;
+  if (dragMode || moved || performance.now() - lastMulti < 500) return;
   const rect = dom.getBoundingClientRect();
   mouseN.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   mouseN.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -987,8 +1068,14 @@ function resize() {
   camera.aspect = w / hgt;
   camera.updateProjectionMatrix();
   const k = controls.radius / fitR; /* preserve user zoom ratio across refits */
-  calcFit();
-  controls.radius = Math.max(fitR * 0.15, Math.min(fitR * 5, fitR * k));
+  const hc = refineCenter(camera.aspect);
+  calcFit(hc);
+  if (!userMoved && !controls.flying) {
+    controls.target.copy(hc);
+    controls.radius = fitR;
+  } else if (!controls.flying) {
+    controls.radius = Math.max(fitR * 0.15, Math.min(fitR * 5, fitR * k));
+  }
   scene.fog.near = fitR * 1.45;
   scene.fog.far = fitR * 3.0;
   applyCamera();
@@ -1002,5 +1089,5 @@ console.log('atlas ready:', regions.length, 'regions');
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a452749b8e272af8',t:'MTc5MTA5ODc1Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a452948f5f775926',t:'MTc5MTEwMDA2NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
