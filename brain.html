@@ -69,9 +69,18 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--
 #tooltip{position:fixed;z-index:20;display:none;pointer-events:none;background:rgba(18,15,30,.94);
   border:1px solid #332d52;border-radius:8px;padding:5px 10px;font-size:12.5px;font-weight:600;
   box-shadow:0 6px 20px rgba(0,0,0,.5)}
-@media (max-width:860px){
-  #panel{width:280px}
-  #view{left:280px}
+#menuBtn{display:none;position:fixed;z-index:15;top:10px;left:10px;width:42px;height:42px;
+  align-items:center;justify-content:center;border-radius:12px;border:1px solid var(--line);
+  background:rgba(18,16,29,.85);color:var(--txt);font-size:19px;cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,.4)}
+#scrim{display:none;position:fixed;inset:0;z-index:9;background:rgba(0,0,0,.5)}
+#scrim.show{display:block}
+@media (max-width:700px){
+  #panel{width:min(86vw,360px);min-width:0;transform:translateX(-103%);
+    transition:transform .25s ease;box-shadow:12px 0 40px rgba(0,0,0,.55)}
+  #panel.open{transform:translateX(0)}
+  #view{left:0}
+  #menuBtn{display:flex}
 }
 </style>
 </head>
@@ -95,6 +104,8 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--
   <div id="listwrap"><div id="regionList"></div></div>
   <div class="foot" id="foot">атлас fsaverage · нажмите «/» — поиск</div>
 </div>
+<button id="menuBtn" title="Меню и поиск">☰</button>
+<div id="scrim"></div>
 <div id="view"><div id="load">Загрузка атласа…</div></div>
 <div id="tooltip"></div>
 
@@ -792,6 +803,7 @@ function pick(i) {
   input.value = byId[it.id].ru;
   results.style.display = 'none';
   input.blur();
+  if (isMobile()) closeDrawer();
 }
 function doSearch() {
   const q = input.value.trim();
@@ -913,7 +925,7 @@ for (const [title, pred] of GROUPS) {
     row.dataset.id = r.id;
     row.innerHTML = '<span class="dot" style="background:rgb(' + r.color.join(',') + ')"></span>' +
       '<span class="ru">' + esc(r.ru) + '</span>';
-    row.addEventListener('click', () => { input.value = r.ru; selectRegion(r.id, true); });
+    row.addEventListener('click', () => { input.value = r.ru; selectRegion(r.id, true); if (isMobile()) closeDrawer(); });
     listEl.appendChild(row);
   }
 }
@@ -923,6 +935,16 @@ $('#btnReset').addEventListener('click', resetView);
 $('#btnSpin').addEventListener('click', () => { controls.autoRotate = !controls.autoRotate; $('#btnSpin').classList.toggle('off', !controls.autoRotate); });
 $('#btnClear').addEventListener('click', () => { clearSelection(); input.value = ''; specialBox.style.display = 'none'; });
 
+/* ================= mobile drawer ================= */
+const menuBtn = $('#menuBtn'), panelEl = $('#panel'), scrimEl = $('#scrim');
+const isMobile = () => window.matchMedia('(max-width:700px)').matches;
+function closeDrawer() { panelEl.classList.remove('open'); scrimEl.classList.remove('show'); }
+menuBtn.addEventListener('click', () => {
+  const open = panelEl.classList.toggle('open');
+  scrimEl.classList.toggle('show', open);
+});
+scrimEl.addEventListener('click', closeDrawer);
+
 /* ================= resize & start ================= */
 function resize() {
   const w = canvasWrap.clientWidth, hgt = canvasWrap.clientHeight;
@@ -930,7 +952,7 @@ function resize() {
   camera.aspect = w / hgt;
   camera.updateProjectionMatrix();
 }
-window.addEventListener('resize', resize);
+window.addEventListener('resize', () => { resize(); if (!isMobile()) closeDrawer(); });
 resize();
 applyCamera();
 tick();
@@ -939,5 +961,5 @@ console.log('atlas ready:', regions.length, 'regions');
 })();
 
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a4522a8f8842d82d',t:'MTc5MTA5NTcyMw=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
