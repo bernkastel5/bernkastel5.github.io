@@ -12,7 +12,7 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
   font:14px/1.45 "Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif}
-#panel{position:fixed;z-index:5;left:0;top:0;bottom:0;width:344px;min-width:300px;
+#panel{position:fixed;z-index:12;left:0;top:0;bottom:0;width:344px;min-width:300px;
   background:linear-gradient(180deg,#141122 0%,#100e1b 100%);border-right:1px solid var(--line);
   display:flex;flex-direction:column;box-shadow:8px 0 30px rgba(0,0,0,.35)}
 #phead{padding:16px 16px 10px}
@@ -609,19 +609,48 @@ function clearHighlight() {
 }
 
 /* ================= camera & controls ================= */
+/* phi = angle from superior (MNI +Z, screen-up), theta = angle from anterior (+Y) */
+const FOV = 42;
+const tanHalfV = Math.tan((FOV / 2) * Math.PI / 180);
+/* real brain center + bounding-sphere radius from actual geometry */
+const CTR = [0, 0, 0];
+{
+  let n = 0;
+  for (const h of ['lh', 'rh']) { const p = hemis[h].pos; for (let i = 0; i < p.length; i += 3) { CTR[0] += p[i]; CTR[1] += p[i + 1]; CTR[2] += p[i + 2]; n++; } }
+  CTR[0] /= n; CTR[1] /= n; CTR[2] /= n;
+}
+let BRAIN_R = 1;
+for (const h of ['lh', 'rh']) {
+  const p = hemis[h].pos;
+  for (let i = 0; i < p.length; i += 3) {
+    const dx = p[i] - CTR[0], dy = p[i + 1] - CTR[1], dz = p[i + 2] - CTR[2];
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > BRAIN_R) BRAIN_R = d;
+  }
+}
+const CENTER = new THREE.Vector3(CTR[0], CTR[1], CTR[2]);
+const HOME_PHI = 1.18, HOME_THETA = 0.78;
+let fitR = 300;
+function calcFit() {
+  const a = Math.max(0.1, camera.aspect || 1);
+  const halfH = Math.atan(tanHalfV * a);
+  fitR = (BRAIN_R / Math.sin(Math.min((FOV / 2) * Math.PI / 180, halfH))) * 1.03;
+  return fitR;
+}
 const controls = {
-  target: new THREE.Vector3(0, -16, 15),
-  radius: 235, phi: 1.42, theta: 0.55,
+  target: CENTER.clone(),
+  radius: 300, phi: HOME_PHI, theta: HOME_THETA,
   autoRotate: true,
   flying: null,
 };
+camera.up.set(0, 0, 1); /* screen-up = superior, so frontal/occipital views never degenerate */
 function applyCamera() {
   const { target, radius, phi, theta } = controls;
   const sp = Math.sin(phi), cp = Math.cos(phi);
   camera.position.set(
     target.x + radius * sp * Math.sin(theta),
-    target.y + radius * cp,
-    target.z + radius * sp * Math.cos(theta)
+    target.y + radius * sp * Math.cos(theta),
+    target.z + radius * cp
   );
   camera.lookAt(target);
 }
@@ -647,10 +676,16 @@ function flyToRegion(r) {
   controls.autoRotate = false;
 }
 function resetView() {
+  const r = calcFit();
+  const sp = Math.sin(HOME_PHI), cp = Math.cos(HOME_PHI);
   controls.flying = {
     t0: performance.now(), dur: 900,
-    fromPos: camera.position.clone(), toPos: new THREE.Vector3(121, 20, 211),
-    fromTarget: controls.target.clone(), toTarget: new THREE.Vector3(0, -16, 15),
+    fromPos: camera.position.clone(), toPos: new THREE.Vector3(
+      CENTER.x + r * sp * Math.sin(HOME_THETA),
+      CENTER.y + r * sp * Math.cos(HOME_THETA),
+      CENTER.z + r * cp
+    ),
+    fromTarget: controls.target.clone(), toTarget: CENTER.clone(),
   };
   controls.autoRotate = false;
 }
@@ -667,8 +702,8 @@ function tick() {
       controls.flying = null;
       const off = camera.position.clone().sub(controls.target);
       controls.radius = off.length();
-      controls.phi = Math.acos(Math.max(-1, Math.min(1, off.y / (controls.radius || 1))));
-      controls.theta = Math.atan2(off.x, off.z);
+      controls.phi = Math.acos(Math.max(-1, Math.min(1, off.z / (controls.radius || 1))));
+      controls.theta = Math.atan2(off.x, off.y);
     }
   } else if (controls.autoRotate) {
     controls.theta += 0.0022;
@@ -710,7 +745,7 @@ dom.addEventListener('pointerup', e => { dragMode = null; });
 dom.addEventListener('contextmenu', e => e.preventDefault());
 dom.addEventListener('wheel', e => {
   e.preventDefault();
-  controls.radius = Math.max(45, Math.min(480, controls.radius * Math.exp(e.deltaY * 0.0011)));
+  controls.radius = Math.max(fitR * 0.22, Math.min(fitR * 3.5, controls.radius * Math.exp(e.deltaY * 0.0011)));
 }, { passive: false });
 /* touch pinch */
 let pinchD = 0;
@@ -720,7 +755,7 @@ dom.addEventListener('touchstart', e => {
 dom.addEventListener('touchmove', e => {
   if (e.touches.length === 2) {
     const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-    if (pinchD > 0) controls.radius = Math.max(45, Math.min(480, controls.radius * pinchD / d));
+    if (pinchD > 0) controls.radius = Math.max(fitR * 0.22, Math.min(fitR * 3.5, controls.radius * pinchD / d));
     pinchD = d;
   }
 }, { passive: true });
@@ -951,6 +986,12 @@ function resize() {
   renderer.setSize(w, hgt, false);
   camera.aspect = w / hgt;
   camera.updateProjectionMatrix();
+  const k = controls.radius / fitR; /* preserve user zoom ratio across refits */
+  calcFit();
+  controls.radius = Math.max(fitR * 0.15, Math.min(fitR * 5, fitR * k));
+  scene.fog.near = fitR * 1.45;
+  scene.fog.far = fitR * 3.0;
+  applyCamera();
 }
 window.addEventListener('resize', () => { resize(); if (!isMobile()) closeDrawer(); });
 resize();
@@ -961,5 +1002,5 @@ console.log('atlas ready:', regions.length, 'regions');
 })();
 
 </script>
-</body>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a452749b8e272af8',t:'MTc5MTA5ODc1Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
